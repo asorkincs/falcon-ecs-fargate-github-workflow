@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide demonstrates how to automate the deployment of the CrowdStrike Falcon Container sensor to your existing ECS Fargate applications. The workflow will:
+This guide demonstrates how to use a GitHub Actions Workflow to automate the deployment of the CrowdStrike Falcon Container sensor to your existing ECS Fargate applications. The workflow will:
 
 1. Pull your application image from ECR
 2. Pull the latest Falcon Container sensor
