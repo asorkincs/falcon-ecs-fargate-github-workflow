@@ -1,0 +1,207 @@
+name: Secure ECS Application with Falcon Container Sensor
+
+on:
+  # no push trigger by default to prevent automatic execution
+  # push:
+    # branches: [ main ]  # CUSTOMIZE: Change to your deployment branch
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: 'AWS Region'
+        required: true
+        default: 'your-region'  # CUSTOMIZE: Change to your AWS region
+      ecs_cluster:
+        description: 'ECS Cluster name'
+        required: true
+        default: 'your-ecs-cluster'  # CUSTOMIZE: Change to your ECS cluster name
+      sensor_repo:
+        description: 'Falcon Sensor ECR repository'
+        required: true
+        default: 'falcon-sensor/falcon-container'  # CUSTOMIZE: Change to your sensor repository
+      app_repo:
+        description: 'Application ECR repository (e.g., your-app/webapp)'
+        required: true
+        default: 'your-app/webapp'  # CUSTOMIZE: Change to your app repository
+      app_tag:
+        description: 'Application image tag'
+        required: true
+        default: 'latest'
+      existing_task_definition:
+        description: 'Existing task definition to use as a base'
+        required: true
+        default: 'your-existing-webapp'  # CUSTOMIZE: Change to your existing task definition
+      task_family:
+        description: 'New task definition family name'
+        required: true
+        default: 'secure-webapp'  # CUSTOMIZE: Change to your preferred task name
+
+jobs:
+  secure-application:
+    name: Add Falcon Container Sensor
+    runs-on: ubuntu-latest
+
+    steps:
+    # Step 1: Configure AWS credentials for accessing AWS resources
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ github.event.inputs.aws_region }}
+
+    # Step 2: Login to Amazon ECR to access container repositories
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    # Step 3: Set AWS account ID for building repository URIs
+    - name: Set AWS account ID
+      run: echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)" >> $GITHUB_ENV
+
+    # Step 4: Set full repository URIs for application and sensor images
+    - name: Set repository URIs
+      run: |
+        # Set full repository URIs
+        echo "APP_REPO_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ github.event.inputs.aws_region }}.amazonaws.com/${{ github.event.inputs.app_repo }}" >> $GITHUB_ENV
+        echo "SENSOR_REPO_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ github.event.inputs.aws_region }}.amazonaws.com/${{ github.event.inputs.sensor_repo }}" >> $GITHUB_ENV
+
+    # Step 5: Pull the existing application image from ECR
+    - name: Pull application image
+      run: |
+        APP_TAG="${{ github.event.inputs.app_tag }}"
+        docker pull "${{ env.APP_REPO_URI }}":"$APP_TAG"
+        echo "Pulled existing application image: ${{ env.APP_REPO_URI }}:$APP_TAG"
+
+    # Step 6: Pull the latest Falcon Container sensor image
+    - name: Pull Falcon Container Sensor image
+      env:
+        FALCON_CLIENT_ID: ${{ secrets.FALCON_CLIENT_ID }}
+        FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
+      run: |
+        # Pull the latest Falcon Container sensor image using CrowdStrike's script
+        export LATESTSENSOR=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -t falcon-container | tail -1)
+        echo "Latest sensor: $LATESTSENSOR"
+
+        # Tag and push the sensor image to ECR
+        docker tag "$LATESTSENSOR" "${{ env.SENSOR_REPO_URI }}":"latest"
+        docker push "${{ env.SENSOR_REPO_URI }}":"latest"
+
+    # Step 7: Patch application image with Falcon Container sensor
+    - name: Patch application image with Falcon Container sensor
+      env:
+        FALCON_CID: ${{ secrets.FALCON_CID }}
+      run: |
+        # Run Falcon utility to patch the application image with the sensor
+        APP_TAG="${{ github.event.inputs.app_tag }}"
+        docker run --user 0:0 \
+          --platform linux/amd64 \
+          -v ${HOME}/.docker/config.json:/root/.docker/config.json \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          --rm "${{ env.SENSOR_REPO_URI }}":"latest" \
+          falconutil patch-image \
+          --source-image-uri "${{ env.APP_REPO_URI }}":"$APP_TAG" \
+          --target-image-uri "${{ env.APP_REPO_URI }}":"patched-$APP_TAG" \
+          --falcon-image-uri "${{ env.SENSOR_REPO_URI }}":"latest" \
+          --cid "$FALCON_CID" \
+          --image-pull-policy IfNotPresent \
+          --cloud-service ECS_FARGATE
+
+        # Push the patched image to ECR
+        docker push "${{ env.APP_REPO_URI }}":"patched-$APP_TAG"
+        echo "Created and pushed patched image: ${{ env.APP_REPO_URI }}:patched-$APP_TAG"
+
+    # Step 8: Get existing task definition to use as a base
+    - name: Get existing task definition
+      run: |
+        # Get the existing task definition to use as a base template
+        EXISTING_TASK_DEF=$(aws ecs describe-task-definition --task-definition ${{ github.event.inputs.existing_task_definition }} --query 'taskDefinition' --output json)
+        echo "$EXISTING_TASK_DEF" > existing-task-def.json
+        echo "Retrieved existing task definition as a base template"
+
+    # Step 9: Create patched task definition with Falcon sensor
+    - name: Create patched task definition
+      run: |
+        # Extract key properties from existing task definition
+        CPU=$(jq -r '.cpu' existing-task-def.json)
+        MEMORY=$(jq -r '.memory' existing-task-def.json)
+        EXECUTION_ROLE=$(jq -r '.executionRoleArn' existing-task-def.json)
+        TASK_ROLE=$(jq -r '.taskRoleArn // ""' existing-task-def.json)
+        NETWORK_MODE=$(jq -r '.networkMode' existing-task-def.json)
+        REQUIRES_COMPAT=$(jq -r '.requiresCompatibilities' existing-task-def.json)
+        VOLUMES=$(jq -r '.volumes // []' existing-task-def.json)
+        APP_TAG="${{ github.event.inputs.app_tag }}"
+        TASK_FAMILY="${{ github.event.inputs.task_family }}"
+
+        # Extract the original container definition to preserve all properties
+        CONTAINER_DEF=$(jq '.containerDefinitions[0]' existing-task-def.json)
+
+        # Update the image in the container definition
+        CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "${{ env.APP_REPO_URI }}:patched-$APP_TAG" '.image = $img')
+
+        # Add or update the linuxParameters with SYS_PTRACE capability
+        if echo $CONTAINER_DEF | jq -e '.linuxParameters' > /dev/null; then
+          # Update existing linuxParameters
+          CONTAINER_DEF=$(echo $CONTAINER_DEF | jq '.linuxParameters.capabilities.add |= (. + ["SYS_PTRACE"] | unique)')
+        else
+          # Add new linuxParameters
+          CONTAINER_DEF=$(echo $CONTAINER_DEF | jq '. += {"linuxParameters": {"capabilities": {"add": ["SYS_PTRACE"], "drop": []}}}')
+        fi
+
+        # Create task definition JSON structure
+        echo "{" > patched-task-definition.json
+        echo "  \"family\": \"$TASK_FAMILY\"," >> patched-task-definition.json
+        echo "  \"networkMode\": \"$NETWORK_MODE\"," >> patched-task-definition.json
+        echo "  \"executionRoleArn\": \"$EXECUTION_ROLE\"," >> patched-task-definition.json
+
+        # Add taskRoleArn if it exists
+        if [ ! -z "$TASK_ROLE" ] && [ "$TASK_ROLE" != "null" ]; then
+          echo "  \"taskRoleArn\": \"$TASK_ROLE\"," >> patched-task-definition.json
+        fi
+
+        echo "  \"requiresCompatibilities\": $REQUIRES_COMPAT," >> patched-task-definition.json
+        echo "  \"cpu\": \"$CPU\"," >> patched-task-definition.json
+        echo "  \"memory\": \"$MEMORY\"," >> patched-task-definition.json
+
+        # Add volumes if they exist
+        if [ "$VOLUMES" != "[]" ]; then
+          echo "  \"volumes\": $VOLUMES," >> patched-task-definition.json
+        fi
+
+        # Add container definitions
+        echo "  \"containerDefinitions\": [" >> patched-task-definition.json
+        echo "    $CONTAINER_DEF" >> patched-task-definition.json
+        echo "  ]" >> patched-task-definition.json
+        echo "}" >> patched-task-definition.json
+
+        # Register the patched task definition with ECS
+        aws ecs register-task-definition --cli-input-json file://patched-task-definition.json
+        echo "Created and registered new task definition: $TASK_FAMILY"
+
+    # Step 10: Deploy the patched application to ECS Fargate
+    - name: Deploy to Amazon ECS
+      run: |
+        # Get subnet IDs for the default VPC
+        # CUSTOMIZE: You may need to specify specific subnets instead of using default ones
+        SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=default-for-az,Values=true" --query 'Subnets[*].SubnetId' --output text | tr '\t' ',')
+
+        # Get security group ID for the default VPC
+        # CUSTOMIZE: You may need to specify a specific security group instead of using default
+        SECURITY_GROUP_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=default" --query 'SecurityGroups[0].GroupId' --output text)
+
+        TASK_FAMILY="${{ github.event.inputs.task_family }}"
+
+        # Deploy the patched task to ECS Fargate
+        TASK_ARN=$(aws ecs run-task \
+          --cluster ${{ github.event.inputs.ecs_cluster }} \
+          --task-definition $TASK_FAMILY \
+          --network-configuration "awsvpcConfiguration={subnets=[${SUBNET_IDS%,}],securityGroups=[${SECURITY_GROUP_ID}],assignPublicIp=ENABLED}" \
+          --launch-type FARGATE \
+          --query 'tasks[0].taskArn' \
+          --output text)
+
+        echo "Deployed patched application to ECS Fargate"
+        echo "Task ARN: $TASK_ARN"
+
+        # Extract task ID for Falcon console verification
+        TASK_ID=$(echo $TASK_ARN | awk -F '/' '{print $3}')
+        echo "Task ID for Falcon console verification: $TASK_ID"
