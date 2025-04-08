@@ -1,4 +1,4 @@
-# CrowdStrike Falcon Container Sensor Deployment for ECS Fargate
+# Falcon Container Sensor Deployment for ECS Fargate via GitHub Actions Workflow
 
 ## Overview
 
