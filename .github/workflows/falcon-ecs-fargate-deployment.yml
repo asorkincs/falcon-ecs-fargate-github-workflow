@@ -82,38 +82,37 @@ jobs:
         FALCON_CLIENT_ID: ${{ secrets.FALCON_CLIENT_ID }}
         FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
       run: |
-        # Download the falcon-container-sensor-pull script
-        curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh -o falcon-container-sensor-pull.sh
-        chmod +x falcon-container-sensor-pull.sh
-
         # Get the version based on input parameter
         SENSOR_VERSION="${{ github.event.inputs.sensor_version }}"
 
         if [[ "$SENSOR_VERSION" == "latest" ]]; then
           # Pull the latest sensor version
-          export LATESTSENSOR=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container | tail -1)
-          # Get the tag for reference
-          SENSOR_TAG=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-1]')
-          echo "Using latest sensor version: $SENSOR_TAG"
+          export LATESTSENSOR=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container | tail -1)
+          echo "Using latest sensor version"
+          # Get tag for reference
+          SENSOR_TAG=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-1]')
+          echo "Sensor version: $SENSOR_TAG"
         elif [[ "$SENSOR_VERSION" == "n-1" ]]; then
-          # List tags and get the second latest version
-          SENSOR_TAG=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-2]')
+          # Get the second latest version tag
+          SENSOR_TAG=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-2]')
           echo "Using n-1 sensor version: $SENSOR_TAG"
-          export LATESTSENSOR=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
+          # Pull that specific version
+          export LATESTSENSOR=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
         elif [[ "$SENSOR_VERSION" == "n-2" ]]; then
-          # List tags and get the third latest version
-          SENSOR_TAG=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-3]')
+          # Get the third latest version tag
+          SENSOR_TAG=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-3]')
           echo "Using n-2 sensor version: $SENSOR_TAG"
-          export LATESTSENSOR=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
+          # Pull that specific version
+          export LATESTSENSOR=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
         else
           # Use the specified version
           SENSOR_TAG="$SENSOR_VERSION"
           echo "Using specified sensor version: $SENSOR_TAG"
-          export LATESTSENSOR=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
+          export LATESTSENSOR=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
         fi
 
         # Error handling for non-existent versions or login failures
-        if [[ -z "$LATESTSENSOR" || "$LATESTSENSOR" == *"ERROR"* || "$LATESTSENSOR" == *"Error"* ]]; then
+        if [[ -z "$LATESTSENSOR" || "$LATESTSENSOR" == *"ERROR"* || "$LATESTSENSOR" == *"Error"* || "$LATESTSENSOR" == *"Falcon Registry"* ]]; then
           echo "Error: Failed to pull the sensor image. Check credentials and version availability."
           echo "Full output: $LATESTSENSOR"
           exit 1
