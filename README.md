@@ -155,6 +155,7 @@ Open the workflow file and customize the default values for the workflow inputs 
 - `aws_region`: Your AWS region
 - `ecs_cluster`: Your ECS cluster name
 - `sensor_repo`: ECR repository for the Falcon sensor
+- `sensor_version`: Falcon sensor version to use (latest, n-1, n-2, or specific version)
 - `app_repo`: Your application ECR repository
 - `app_tag`: Your application image tag
 - `existing_task_definition`: Your existing task definition name
@@ -174,6 +175,7 @@ Open the workflow file and customize the default values for the workflow inputs 
    - `aws_region`: Your AWS region
    - `ecs_cluster`: Your ECS cluster name
    - `sensor_repo`: ECR repository for the Falcon sensor
+   - `sensor_version`: Falcon sensor version to use (defaults to "latest")
    - `app_repo`: Your application ECR repository
    - `app_tag`: Your application image tag
    - `existing_task_definition`: Your existing task definition name

@@ -18,6 +18,10 @@ on:
         description: 'Falcon Sensor ECR repository'
         required: true
         default: 'falcon-sensor/falcon-container'  # CUSTOMIZE: Change to your sensor repository
+      sensor_version:
+        description: 'Falcon Sensor version (latest, n-1, n-2, or specific version)'
+        required: false
+        default: 'latest' # CUSTOMIZE: Change to your preferred sensor version
       app_repo:
         description: 'Application ECR repository (e.g., your-app/webapp)'
         required: true
@@ -25,7 +29,7 @@ on:
       app_tag:
         description: 'Application image tag'
         required: true
-        default: 'latest'
+        default: 'latest'  # CUSTOMIZE: Change to your preferred app tag to pull
       existing_task_definition:
         description: 'Existing task definition to use as a base'
         required: true
@@ -72,19 +76,57 @@ jobs:
         docker pull "${{ env.APP_REPO_URI }}":"$APP_TAG"
         echo "Pulled existing application image: ${{ env.APP_REPO_URI }}:$APP_TAG"
 
-    # Step 6: Pull the latest Falcon Container sensor image
+    # Step 6: Pull the specified Falcon Container sensor image version
     - name: Pull Falcon Container Sensor image
       env:
         FALCON_CLIENT_ID: ${{ secrets.FALCON_CLIENT_ID }}
         FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
       run: |
-        # Pull the latest Falcon Container sensor image using CrowdStrike's script
-        export LATESTSENSOR=$(bash <(curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh) -t falcon-container | tail -1)
-        echo "Latest sensor: $LATESTSENSOR"
+        # Download the falcon-container-sensor-pull script
+        curl -Ls https://github.com/CrowdStrike/falcon-scripts/releases/latest/download/falcon-container-sensor-pull.sh -o falcon-container-sensor-pull.sh
+        chmod +x falcon-container-sensor-pull.sh
+
+        # Get the version based on input parameter
+        SENSOR_VERSION="${{ github.event.inputs.sensor_version }}"
+
+        if [[ "$SENSOR_VERSION" == "latest" ]]; then
+          # Get the latest version (tags[-1])
+          SENSOR_TAG=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-1]')
+          echo "Using latest sensor version: $SENSOR_TAG"
+        elif [[ "$SENSOR_VERSION" == "n-1" ]]; then
+          # Get the second latest version (tags[-2])
+          SENSOR_TAG=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-2]')
+          echo "Using n-1 sensor version: $SENSOR_TAG"
+        elif [[ "$SENSOR_VERSION" == "n-2" ]]; then
+          # Get the third latest version (tags[-3])
+          SENSOR_TAG=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container --list-tags | jq -r '.tags[-3]')
+          echo "Using n-2 sensor version: $SENSOR_TAG"
+        else
+          # Use the specified version
+          SENSOR_TAG="$SENSOR_VERSION"
+          echo "Using specified sensor version: $SENSOR_TAG"
+        fi
+
+        # Error handling for non-existent versions
+        if [[ -z "$SENSOR_TAG" || "$SENSOR_TAG" == "null" ]]; then
+          echo "Error: Could not find the requested sensor version."
+          exit 1
+        fi
+
+        # Pull the specific sensor version
+        export LATESTSENSOR=$(./falcon-container-sensor-pull.sh -u $FALCON_CLIENT_ID -s $FALCON_CLIENT_SECRET -t falcon-container -f $SENSOR_TAG | tail -1)
+        echo "Pulled sensor: $LATESTSENSOR"
 
         # Tag and push the sensor image to ECR
+        docker tag "$LATESTSENSOR" "${{ env.SENSOR_REPO_URI }}":"$SENSOR_TAG"
+        docker push "${{ env.SENSOR_REPO_URI }}":"$SENSOR_TAG"
+
+        # Also tag as latest for compatibility with the rest of the workflow
         docker tag "$LATESTSENSOR" "${{ env.SENSOR_REPO_URI }}":"latest"
         docker push "${{ env.SENSOR_REPO_URI }}":"latest"
+
+        # Store the sensor tag for later use
+        echo "SENSOR_TAG=$SENSOR_TAG" >> $GITHUB_ENV
 
     # Step 7: Patch application image with Falcon Container sensor
     - name: Patch application image with Falcon Container sensor
@@ -97,18 +139,21 @@ jobs:
           --platform linux/amd64 \
           -v ${HOME}/.docker/config.json:/root/.docker/config.json \
           -v /var/run/docker.sock:/var/run/docker.sock \
-          --rm "${{ env.SENSOR_REPO_URI }}":"latest" \
+          --rm "${{ env.SENSOR_REPO_URI }}":"${{ env.SENSOR_TAG }}" \
           falconutil patch-image \
           --source-image-uri "${{ env.APP_REPO_URI }}":"$APP_TAG" \
-          --target-image-uri "${{ env.APP_REPO_URI }}":"patched-$APP_TAG" \
-          --falcon-image-uri "${{ env.SENSOR_REPO_URI }}":"latest" \
+          --target-image-uri "${{ env.APP_REPO_URI }}":"patched-$APP_TAG-${{ env.SENSOR_TAG }}" \
+          --falcon-image-uri "${{ env.SENSOR_REPO_URI }}":"${{ env.SENSOR_TAG }}" \
           --cid "$FALCON_CID" \
           --image-pull-policy IfNotPresent \
           --cloud-service ECS_FARGATE
 
         # Push the patched image to ECR
-        docker push "${{ env.APP_REPO_URI }}":"patched-$APP_TAG"
-        echo "Created and pushed patched image: ${{ env.APP_REPO_URI }}:patched-$APP_TAG"
+        docker push "${{ env.APP_REPO_URI }}":"patched-$APP_TAG-${{ env.SENSOR_TAG }}"
+        echo "Created and pushed patched image: ${{ env.APP_REPO_URI }}:patched-$APP_TAG-${{ env.SENSOR_TAG }}"
+
+        # Set the patched image tag for use in task definition
+        echo "PATCHED_IMAGE_TAG=patched-$APP_TAG-${{ env.SENSOR_TAG }}" >> $GITHUB_ENV
 
     # Step 8: Get existing task definition to use as a base
     - name: Get existing task definition
@@ -129,14 +174,13 @@ jobs:
         NETWORK_MODE=$(jq -r '.networkMode' existing-task-def.json)
         REQUIRES_COMPAT=$(jq -r '.requiresCompatibilities' existing-task-def.json)
         VOLUMES=$(jq -r '.volumes // []' existing-task-def.json)
-        APP_TAG="${{ github.event.inputs.app_tag }}"
         TASK_FAMILY="${{ github.event.inputs.task_family }}"
 
         # Extract the original container definition to preserve all properties
         CONTAINER_DEF=$(jq '.containerDefinitions[0]' existing-task-def.json)
 
         # Update the image in the container definition
-        CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "${{ env.APP_REPO_URI }}:patched-$APP_TAG" '.image = $img')
+        CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "${{ env.APP_REPO_URI }}:${{ env.PATCHED_IMAGE_TAG }}" '.image = $img')
 
         # Add or update the linuxParameters with SYS_PTRACE capability
         if echo $CONTAINER_DEF | jq -e '.linuxParameters' > /dev/null; then
@@ -205,3 +249,6 @@ jobs:
         # Extract task ID for Falcon console verification
         TASK_ID=$(echo $TASK_ARN | awk -F '/' '{print $3}')
         echo "Task ID for Falcon console verification: $TASK_ID"
+
+        # Add sensor version information to the output
+        echo "Falcon Container Sensor version: ${{ env.SENSOR_TAG }}"
