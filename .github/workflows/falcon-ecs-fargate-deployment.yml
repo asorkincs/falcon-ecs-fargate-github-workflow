@@ -35,12 +35,12 @@ on:
         required: true
         default: 'your-existing-webapp'  # CUSTOMIZE: Change to your existing task definition
       task_family:
-        description: 'New task definition family name'
+        description: 'New secure task family name'
         required: true
         default: 'secure-webapp'  # CUSTOMIZE: Change to your preferred task name
 
 jobs:
-  secure-application:
+  patch-application:
     name: Add Falcon Container Sensor
     runs-on: ubuntu-latest
 

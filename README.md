@@ -8,7 +8,7 @@ This guide demonstrates how to use a GitHub Actions Workflow to automate the dep
 2. Pull the latest Falcon Container sensor
 3. Patch your application image with the Falcon sensor
 4. Create a new task definition with the patched image
-5. Deploy the protected application to ECS Fargate
+5. Deploy the secured application to ECS Fargate
 
 ---
 
@@ -159,7 +159,7 @@ Open the workflow file and customize the default values for the workflow inputs 
 - `app_repo`: Your application ECR repository
 - `app_tag`: Your application image tag
 - `existing_task_definition`: Your existing task definition name
-- `task_family`: Name for the new task definition
+- `task_family`: New secure task family name
 
 ---
 
@@ -175,11 +175,11 @@ Open the workflow file and customize the default values for the workflow inputs 
    - `aws_region`: Your AWS region
    - `ecs_cluster`: Your ECS cluster name
    - `sensor_repo`: ECR repository for the Falcon sensor
-   - `sensor_version`: Falcon sensor version to use (defaults to "latest")
+   - `sensor_version`: Falcon sensor version to use (latest, n-1, n-2, or specific version)
    - `app_repo`: Your application ECR repository
    - `app_tag`: Your application image tag
    - `existing_task_definition`: Your existing task definition name
-   - `task_family`: Name for the new task definition
+   - `task_family`: New secure task family name
 6. Click "Run workflow" to start the process
 
 ### 2. Monitor the Workflow Execution
@@ -191,15 +191,21 @@ Open the workflow file and customize the default values for the workflow inputs 
 ### 3. Verify Deployment with AWS CLI
 
 ```bash
-# Find the task that uses the patched task definition
-PATCHED_TASK=$(aws ecs list-tasks --cluster YOUR_ECS_CLUSTER --family YOUR_TASK_FAMILY --query 'taskArns[0]' --output text)
+# Find all tasks that use the secure task definition (with Falcon Container Sensor)
+SECURE_TASKS=($(aws ecs list-tasks --cluster YOUR_ECS_CLUSTER --family YOUR_SECURE_TASK_FAMILY --query 'taskArns[]' --output text))
 
-# Get the task details
-aws ecs describe-tasks --cluster YOUR_ECS_CLUSTER --tasks $PATCHED_TASK
+# Process each secure task
+for SECURE_TASK in "${SECURE_TASKS[@]}"; do
+    echo "Processing task: $SECURE_TASK"
 
-# Extract the task ID for Falcon console verification
-TASK_ID=$(echo $PATCHED_TASK | awk -F '/' '{print $3}')
-echo "Task ID for Falcon console verification: $TASK_ID"
+    # Get the task details
+    aws ecs describe-tasks --cluster YOUR_ECS_CLUSTER --tasks $SECURE_TASK
+
+    # Extract the task ID for Falcon console verification
+    TASK_ID=$(echo $SECURE_TASK | awk -F '/' '{print $3}')
+    echo "Task ID for Falcon console verification: $TASK_ID"
+    echo "----------------------------------------"
+done
 ```
 
 ### 4. Verify in Falcon Console
