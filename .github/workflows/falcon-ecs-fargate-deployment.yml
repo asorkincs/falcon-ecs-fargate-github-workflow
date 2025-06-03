@@ -9,11 +9,11 @@ on:
       aws_region:
         description: 'AWS Region'
         required: true
-        default: 'your-region'  # CUSTOMIZE: Change to your AWS region
+        default: 'us-east-1'  # CUSTOMIZE: Change to your AWS region
       ecs_cluster:
         description: 'ECS Cluster name'
         required: true
-        default: 'your-ecs-cluster'  # CUSTOMIZE: Change to your ECS cluster name
+        default: 'falcon-demo-cluster'  # CUSTOMIZE: Change to your ECS cluster name
       sensor_repo:
         description: 'Falcon Sensor ECR repository'
         required: true
@@ -22,18 +22,10 @@ on:
         description: 'Falcon Sensor version (latest, n-1, n-2, or specific version)'
         required: false
         default: 'latest' # CUSTOMIZE: Change to your preferred sensor version
-      app_repo:
-        description: 'Application ECR repository (e.g., your-app/webapp)'
-        required: true
-        default: 'your-app/webapp'  # CUSTOMIZE: Change to your app repository
-      app_tag:
-        description: 'Application image tag'
-        required: true
-        default: 'latest'  # CUSTOMIZE: Change to your preferred app tag to pull
       existing_task_definition:
         description: 'Existing task definition to use as a base'
         required: true
-        default: 'your-existing-webapp'  # CUSTOMIZE: Change to your existing task definition
+        default: 'existing-webapp'  # CUSTOMIZE: Change to your existing task definition
       task_family:
         description: 'New secure task family name'
         required: true
@@ -64,21 +56,13 @@ jobs:
     - name: Set AWS account ID
       run: echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query 'Account' --output text)" >> $GITHUB_ENV
 
-    # Step 4: Set full repository URIs for application and sensor images
+    # Step 4: Set full repository URI for sensor image
     - name: Set repository URIs
       run: |
-        # Set full repository URIs
-        echo "APP_REPO_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ github.event.inputs.aws_region }}.amazonaws.com/${{ github.event.inputs.app_repo }}" >> $GITHUB_ENV
+        # Set full repository URI for sensor
         echo "SENSOR_REPO_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ github.event.inputs.aws_region }}.amazonaws.com/${{ github.event.inputs.sensor_repo }}" >> $GITHUB_ENV
 
-    # Step 5: Pull the existing application image from ECR
-    - name: Pull application image
-      run: |
-        APP_TAG="${{ github.event.inputs.app_tag }}"
-        docker pull "${{ env.APP_REPO_URI }}":"$APP_TAG"
-        echo "Pulled existing application image: ${{ env.APP_REPO_URI }}:$APP_TAG"
-
-    # Step 6: Pull the specified Falcon Container sensor image version
+    # Step 5: Pull the specified Falcon Container sensor image version
     - name: Pull Falcon Container Sensor image
       env:
         FALCON_CLIENT_ID: ${{ secrets.FALCON_CLIENT_ID }}
@@ -146,7 +130,15 @@ jobs:
 
         echo "SENSOR_TAG=$SENSOR_TAG" >> $GITHUB_ENV
 
-    # Step 7: Patch all application images with Falcon Container sensor
+    # Step 6: Get existing task definition to use as a base
+    - name: Get existing task definition
+      run: |
+        # Get the existing task definition to use as a base template
+        EXISTING_TASK_DEF=$(aws ecs describe-task-definition --task-definition ${{ github.event.inputs.existing_task_definition }} --query 'taskDefinition' --output json)
+        echo "$EXISTING_TASK_DEF" > existing-task-def.json
+        echo "Retrieved existing task definition as a base template"
+
+    # Step 7: Patch application images with Falcon Container sensor
     - name: Patch application images with Falcon Container sensor
       env:
         FALCON_CID: ${{ secrets.FALCON_CID }}
@@ -200,15 +192,7 @@ jobs:
           echo "PATCHED_IMAGE_${i}=$REPO_URI:patched-$IMAGE_TAG-${{ env.SENSOR_TAG }}" >> $GITHUB_ENV
         done
 
-    # Step 8: Get existing task definition to use as a base
-    - name: Get existing task definition
-      run: |
-        # Get the existing task definition to use as a base template
-        EXISTING_TASK_DEF=$(aws ecs describe-task-definition --task-definition ${{ github.event.inputs.existing_task_definition }} --query 'taskDefinition' --output json)
-        echo "$EXISTING_TASK_DEF" > existing-task-def.json
-        echo "Retrieved existing task definition as a base template"
-
-    # Step 9: Create patched task definition with Falcon sensor
+    # Step 8: Create patched task definition with Falcon sensor
     - name: Create patched task definition
       run: |
         # Extract key properties from existing task definition
@@ -237,24 +221,9 @@ jobs:
           echo "Processing container $CONTAINER_NAME"
 
           # Get the patched image reference from environment variables
-          if [ $i -eq 0 ]; then
-            # For the first container, use the original patched image variable if it exists
-            ORIGINAL_PATCHED_IMAGE="${{ env.APP_REPO_URI }}:${{ env.PATCHED_IMAGE_TAG }}"
-            PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
-
-            if [ -n "${!PATCHED_IMAGE_VAR}" ]; then
-              PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
-              echo "Using container-specific patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
-            else
-              PATCHED_IMAGE="$ORIGINAL_PATCHED_IMAGE"
-              echo "Using default patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
-            fi
-          else
-            # For other containers, use the container-specific patched image
-            PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
-            PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
-            echo "Using patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
-          fi
+          PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
+          PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
+          echo "Using patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
 
           # Update the image in the container definition
           CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "$PATCHED_IMAGE" '.image = $img')
@@ -312,9 +281,7 @@ jobs:
         aws ecs register-task-definition --cli-input-json file://patched-task-definition.json
         echo "Created and registered new task definition: $TASK_FAMILY"
 
-
-
-    # Step 10: Deploy the patched application to ECS Fargate
+    # Step 9: Deploy the patched application to ECS Fargate
     - name: Deploy to Amazon ECS
       run: |
         # Get subnet IDs for the default VPC
