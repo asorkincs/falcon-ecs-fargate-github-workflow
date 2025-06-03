@@ -146,32 +146,59 @@ jobs:
 
         echo "SENSOR_TAG=$SENSOR_TAG" >> $GITHUB_ENV
 
-    # Step 7: Patch application image with Falcon Container sensor
-    - name: Patch application image with Falcon Container sensor
+    # Step 7: Patch all application images with Falcon Container sensor
+    - name: Patch application images with Falcon Container sensor
       env:
         FALCON_CID: ${{ secrets.FALCON_CID }}
       run: |
-        # Run Falcon utility to patch the application image with the sensor
-        APP_TAG="${{ github.event.inputs.app_tag }}"
-        docker run --user 0:0 \
-          --platform linux/amd64 \
-          -v ${HOME}/.docker/config.json:/root/.docker/config.json \
-          -v /var/run/docker.sock:/var/run/docker.sock \
-          --rm "${{ env.SENSOR_REPO_URI }}":"${{ env.SENSOR_TAG }}" \
-          falconutil patch-image \
-          --source-image-uri "${{ env.APP_REPO_URI }}":"$APP_TAG" \
-          --target-image-uri "${{ env.APP_REPO_URI }}":"patched-$APP_TAG-${{ env.SENSOR_TAG }}" \
-          --falcon-image-uri "${{ env.SENSOR_REPO_URI }}":"${{ env.SENSOR_TAG }}" \
-          --cid "$FALCON_CID" \
-          --image-pull-policy IfNotPresent \
-          --cloud-service ECS_FARGATE
+        # Get the existing task definition
+        EXISTING_TASK_DEF=$(cat existing-task-def.json)
 
-        # Push the patched image to ECR
-        docker push "${{ env.APP_REPO_URI }}":"patched-$APP_TAG-${{ env.SENSOR_TAG }}"
-        echo "Created and pushed patched image: ${{ env.APP_REPO_URI }}:patched-$APP_TAG-${{ env.SENSOR_TAG }}"
+        # Get the number of containers
+        CONTAINER_COUNT=$(jq '.containerDefinitions | length' existing-task-def.json)
+        echo "Found $CONTAINER_COUNT containers in the task definition"
 
-        # Set the patched image tag for use in task definition
-        echo "PATCHED_IMAGE_TAG=patched-$APP_TAG-${{ env.SENSOR_TAG }}" >> $GITHUB_ENV
+        # Process each container
+        for (( i=0; i<$CONTAINER_COUNT; i++ ))
+        do
+          # Extract container details
+          CONTAINER_DEF=$(jq ".containerDefinitions[$i]" existing-task-def.json)
+          CONTAINER_NAME=$(echo $CONTAINER_DEF | jq -r '.name')
+          CONTAINER_IMAGE=$(echo $CONTAINER_DEF | jq -r '.image')
+
+          # Extract repository and tag from the image
+          REPO_URI=$(echo $CONTAINER_IMAGE | cut -d':' -f1)
+          IMAGE_TAG=$(echo $CONTAINER_IMAGE | cut -d':' -f2)
+          if [ "$IMAGE_TAG" == "$CONTAINER_IMAGE" ]; then
+            IMAGE_TAG="latest"
+          fi
+
+          echo "Processing container $CONTAINER_NAME with image $REPO_URI:$IMAGE_TAG"
+
+          # Pull the container image
+          docker pull "$REPO_URI":"$IMAGE_TAG"
+
+          # Patch the container image with Falcon sensor
+          docker run --user 0:0 \
+            --platform linux/amd64 \
+            -v ${HOME}/.docker/config.json:/root/.docker/config.json \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            --rm "${{ env.SENSOR_REPO_URI }}":"${{ env.SENSOR_TAG }}" \
+            falconutil patch-image \
+            --source-image-uri "$REPO_URI":"$IMAGE_TAG" \
+            --target-image-uri "$REPO_URI":"patched-$IMAGE_TAG-${{ env.SENSOR_TAG }}" \
+            --falcon-image-uri "${{ env.SENSOR_REPO_URI }}":"${{ env.SENSOR_TAG }}" \
+            --cid "$FALCON_CID" \
+            --image-pull-policy IfNotPresent \
+            --cloud-service ECS_FARGATE
+
+          # Push the patched image
+          docker push "$REPO_URI":"patched-$IMAGE_TAG-${{ env.SENSOR_TAG }}"
+          echo "Created and pushed patched image: $REPO_URI:patched-$IMAGE_TAG-${{ env.SENSOR_TAG }}"
+
+          # Store the patched image reference for task definition update
+          echo "PATCHED_IMAGE_${i}=$REPO_URI:patched-$IMAGE_TAG-${{ env.SENSOR_TAG }}" >> $GITHUB_ENV
+        done
 
     # Step 8: Get existing task definition to use as a base
     - name: Get existing task definition
@@ -196,6 +223,7 @@ jobs:
 
         # Get the number of containers
         CONTAINER_COUNT=$(jq '.containerDefinitions | length' existing-task-def.json)
+        echo "Found $CONTAINER_COUNT containers in the task definition"
 
         # Start building the container definitions array
         CONTAINER_DEFS="["
@@ -205,10 +233,28 @@ jobs:
         do
           # Get the original container definition
           CONTAINER_DEF=$(jq ".containerDefinitions[$i]" existing-task-def.json)
+          CONTAINER_NAME=$(echo $CONTAINER_DEF | jq -r '.name')
+          echo "Processing container $CONTAINER_NAME"
 
           # Get the patched image reference from environment variables
-          PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
-          PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
+          if [ $i -eq 0 ]; then
+            # For the first container, use the original patched image variable if it exists
+            ORIGINAL_PATCHED_IMAGE="${{ env.APP_REPO_URI }}:${{ env.PATCHED_IMAGE_TAG }}"
+            PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
+
+            if [ -n "${!PATCHED_IMAGE_VAR}" ]; then
+              PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
+              echo "Using container-specific patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
+            else
+              PATCHED_IMAGE="$ORIGINAL_PATCHED_IMAGE"
+              echo "Using default patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
+            fi
+          else
+            # For other containers, use the container-specific patched image
+            PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
+            PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
+            echo "Using patched image for $CONTAINER_NAME: $PATCHED_IMAGE"
+          fi
 
           # Update the image in the container definition
           CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "$PATCHED_IMAGE" '.image = $img')
@@ -258,9 +304,14 @@ jobs:
         echo "  \"containerDefinitions\": $CONTAINER_DEFS" >> patched-task-definition.json
         echo "}" >> patched-task-definition.json
 
+        # Display the patched task definition for debugging
+        echo "Patched task definition:"
+        cat patched-task-definition.json
+
         # Register the patched task definition with ECS
         aws ecs register-task-definition --cli-input-json file://patched-task-definition.json
         echo "Created and registered new task definition: $TASK_FAMILY"
+
 
 
     # Step 10: Deploy the patched application to ECS Fargate
