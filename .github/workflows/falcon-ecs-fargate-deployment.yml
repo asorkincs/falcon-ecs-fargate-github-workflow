@@ -194,20 +194,45 @@ jobs:
         VOLUMES=$(jq -r '.volumes // []' existing-task-def.json)
         TASK_FAMILY="${{ github.event.inputs.task_family }}"
 
-        # Extract the original container definition to preserve all properties
-        CONTAINER_DEF=$(jq '.containerDefinitions[0]' existing-task-def.json)
+        # Get the number of containers
+        CONTAINER_COUNT=$(jq '.containerDefinitions | length' existing-task-def.json)
 
-        # Update the image in the container definition
-        CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "${{ env.APP_REPO_URI }}:${{ env.PATCHED_IMAGE_TAG }}" '.image = $img')
+        # Start building the container definitions array
+        CONTAINER_DEFS="["
 
-        # Add or update the linuxParameters with SYS_PTRACE capability
-        if echo $CONTAINER_DEF | jq -e '.linuxParameters' > /dev/null; then
-          # Update existing linuxParameters
-          CONTAINER_DEF=$(echo $CONTAINER_DEF | jq '.linuxParameters.capabilities.add |= (. + ["SYS_PTRACE"] | unique)')
-        else
-          # Add new linuxParameters
-          CONTAINER_DEF=$(echo $CONTAINER_DEF | jq '. += {"linuxParameters": {"capabilities": {"add": ["SYS_PTRACE"], "drop": []}}}')
-        fi
+        # Process each container definition
+        for (( i=0; i<$CONTAINER_COUNT; i++ ))
+        do
+          # Get the original container definition
+          CONTAINER_DEF=$(jq ".containerDefinitions[$i]" existing-task-def.json)
+
+          # Get the patched image reference from environment variables
+          PATCHED_IMAGE_VAR="PATCHED_IMAGE_${i}"
+          PATCHED_IMAGE="${!PATCHED_IMAGE_VAR}"
+
+          # Update the image in the container definition
+          CONTAINER_DEF=$(echo $CONTAINER_DEF | jq --arg img "$PATCHED_IMAGE" '.image = $img')
+
+          # Add or update the linuxParameters with SYS_PTRACE capability
+          if echo $CONTAINER_DEF | jq -e '.linuxParameters' > /dev/null; then
+            # Update existing linuxParameters
+            CONTAINER_DEF=$(echo $CONTAINER_DEF | jq '.linuxParameters.capabilities.add |= (. + ["SYS_PTRACE"] | unique)')
+          else
+            # Add new linuxParameters
+            CONTAINER_DEF=$(echo $CONTAINER_DEF | jq '. += {"linuxParameters": {"capabilities": {"add": ["SYS_PTRACE"], "drop": []}}}')
+          fi
+
+          # Add the container definition to the array
+          CONTAINER_DEFS+="$CONTAINER_DEF"
+
+          # Add comma if not the last container
+          if [ $i -lt $(($CONTAINER_COUNT-1)) ]; then
+            CONTAINER_DEFS+=","
+          fi
+        done
+
+        # Close the container definitions array
+        CONTAINER_DEFS+="]"
 
         # Create task definition JSON structure
         echo "{" > patched-task-definition.json
@@ -230,14 +255,13 @@ jobs:
         fi
 
         # Add container definitions
-        echo "  \"containerDefinitions\": [" >> patched-task-definition.json
-        echo "    $CONTAINER_DEF" >> patched-task-definition.json
-        echo "  ]" >> patched-task-definition.json
+        echo "  \"containerDefinitions\": $CONTAINER_DEFS" >> patched-task-definition.json
         echo "}" >> patched-task-definition.json
 
         # Register the patched task definition with ECS
         aws ecs register-task-definition --cli-input-json file://patched-task-definition.json
         echo "Created and registered new task definition: $TASK_FAMILY"
+
 
     # Step 10: Deploy the patched application to ECS Fargate
     - name: Deploy to Amazon ECS
