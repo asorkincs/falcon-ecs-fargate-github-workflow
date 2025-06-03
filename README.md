@@ -4,10 +4,10 @@
 
 This guide demonstrates how to use a GitHub Actions Workflow to automate the deployment of the CrowdStrike Falcon Container sensor to your existing ECS Fargate applications. The workflow will:
 
-1. Pull your application image from ECR
+1. Pull your application image(s) from ECR
 2. Pull the latest Falcon Container sensor
-3. Patch your application image with the Falcon sensor
-4. Create a new task definition with the patched image
+3. Patch your application image(s) with the Falcon sensor
+4. Create a new task definition with the patched image(s)
 5. Deploy the secured application to ECS Fargate
 
 ---
@@ -156,8 +156,6 @@ Open the workflow file and customize the default values for the workflow inputs 
 - `ecs_cluster`: Your ECS cluster name
 - `sensor_repo`: ECR repository for the Falcon sensor
 - `sensor_version`: Falcon sensor version to use (latest, n-1, n-2, or specific version)
-- `app_repo`: Your application ECR repository
-- `app_tag`: Your application image tag
 - `existing_task_definition`: Your existing task definition name
 - `task_family`: New secure task family name
 
@@ -176,8 +174,6 @@ Open the workflow file and customize the default values for the workflow inputs 
    - `ecs_cluster`: Your ECS cluster name
    - `sensor_repo`: ECR repository for the Falcon sensor
    - `sensor_version`: Falcon sensor version to use (latest, n-1, n-2, or specific version)
-   - `app_repo`: Your application ECR repository
-   - `app_tag`: Your application image tag
    - `existing_task_definition`: Your existing task definition name
    - `task_family`: New secure task family name
 6. Click "Run workflow" to start the process
